@@ -639,22 +639,21 @@ int main(int argc, char** argv)
 
   bool v6 = false;
 
+  // Check for "-v6" and remove from argv.
+  for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "-v6")) {
+      v6 = true;
+      argc--;
+      for (int j = i; j < argc; j++)
+        argv[j] = argv[j + 1];
+    }
+  }
+
   if (argc < 3)
     PrintUsage();
 
-  char** after_switch;
-
-  if (!strcmp(argv[1], "-v6")) {
-    v6 = true;
-    if (argc < 4)
-      PrintUsage();
-    after_switch = argv + 2;
-  } else {
-    after_switch = argv + 1;
-  }
-
-  char* dns_server_addr_str = after_switch[0];
-  char* hostname = after_switch[1];
+  char* dns_server_addr_str = argv[1];
+  char* hostname = argv[2];
 
   size_t encoded_hostname_len = 0;
   unsigned char encoded_hostname[MAX_NAME_LEN];
