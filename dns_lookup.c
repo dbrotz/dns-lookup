@@ -215,6 +215,79 @@ bool IsValidCharacter(unsigned char c)
        || c == '-');
 }
 
+bool IsValidStartCharacter(unsigned char c)
+{
+  return ((c >= 'a' && c <= 'z')
+       || (c >= 'A' && c <= 'Z'));
+}
+
+bool IsValidEndCharacter(unsigned char c)
+{
+  return ((c >= 'a' && c <= 'z')
+       || (c >= 'A' && c <= 'Z')
+       || (c >= '0' && c <= '9'));
+}
+
+bool IsPrintableCharacter(unsigned char c)
+{
+  return (c >= 0x20 && c < 0x7F);
+}
+
+void CheckLabelCharacters(const char* label, int label_len)
+{
+  char s[5];
+  char c = 0;
+  enum { NONE, START, END, ANY } type = NONE;
+
+  for (int i = 0; i < label_len; i++) {
+    if (!IsValidCharacter(label[i])) {
+      c = label[i];
+      type = ANY;
+      break;
+    }
+  }
+
+  if (type == NONE) {
+    if (!IsValidStartCharacter(label[0])) {
+      c = label[0];
+      type = START;
+    } else if (!IsValidEndCharacter(label[label_len - 1])) {
+      c = label[label_len - 1];
+      type = END;
+    } else {
+      return;
+    }
+  }
+
+  if (IsPrintableCharacter(c))
+    snprintf(s, sizeof(s), "%c", c);
+  else
+    snprintf(s, sizeof(s), "\\x%02X", c);
+
+  switch (type) {
+  case NONE:
+    // not possible
+    break;
+  case START:
+    FatalError(
+      "Label \"%.*s\" has invalid starting character: \"%s\"\n",
+      label_len,
+      label,
+      s);
+    break;
+  case END:
+    FatalError(
+      "Label \"%.*s\" has invalid ending character: \"%s\"\n",
+      label_len,
+      label,
+      s);
+    break;
+  case ANY:
+    FatalError("Hostname contains invalid character: \"%s\"\n", s);
+    break;
+  }
+}
+
 void EncodeHostname(
   const char* hostname,
   unsigned char* encoded_hostname,
@@ -235,6 +308,7 @@ do {                                                                 \
     FatalError("Empty label in hostname\n");                         \
   if (label_len > MAX_LABEL_LEN)                                     \
     FatalError("Label is too long\n");                               \
+  CheckLabelCharacters(hostname + label_start, label_len);           \
   encoded_hostname[out++] = label_len;                               \
   memcpy(encoded_hostname + out, hostname + label_start, label_len); \
   out += label_len;                                                  \
@@ -246,8 +320,6 @@ do {                                                                 \
       COPY_LABEL();
       label_start = i + 1;
       label_len = 0;
-    } else if (!IsValidCharacter(c)) {
-      FatalError("Hostname contains invalid character: 0x%X\n", c);
     } else {
       label_len++;
     }
@@ -294,6 +366,10 @@ bool ValidateEncodedHostname(const unsigned char* encoded_hostname)
     if (label_len > MAX_LABEL_LEN)
       return false;
     if (pos + label_len >= MAX_NAME_LEN)
+      return false;
+    if (!IsValidStartCharacter(encoded_hostname[pos]))
+      return false;
+    if (!IsValidEndCharacter(encoded_hostname[pos + (label_len - 1)]))
       return false;
     for (size_t i = 0; i < label_len; i++)
       if (!IsValidCharacter(encoded_hostname[pos + i]))
