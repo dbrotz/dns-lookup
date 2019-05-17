@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdnoreturn.h>
 #include <string.h>
 #include <errno.h>
 #include <time.h>
@@ -36,7 +37,13 @@
 
 #define NUM_RCODES 6
 
-const char *rcode_messages[NUM_RCODES] = {
+typedef struct Buffer {
+  unsigned char* data;
+  size_t pos;
+  size_t len;
+} Buffer;
+
+const char* rcode_messages[NUM_RCODES] = {
   "No error",
   "Format error",
   "Server failure",
@@ -45,13 +52,103 @@ const char *rcode_messages[NUM_RCODES] = {
   "Refused",
 };
 
-void FatalError(const char* format, ...)
+noreturn void FatalError(const char* format, ...)
 {
   va_list args;
   va_start(args, format);
   vfprintf(stderr, format, args);
   va_end(args);
   exit(EXIT_FAILURE);
+}
+
+void CheckReadBufferOverflowAt(Buffer* buffer, size_t pos, size_t count)
+{
+  size_t len = buffer->len;
+  size_t new_pos = pos + count;
+  if (new_pos > len || new_pos < pos)
+    FatalError("Buffer overflow when reading %zu bytes\n", count);
+}
+
+void CheckReadBufferOverflow(Buffer* buffer, size_t count)
+{
+  CheckReadBufferOverflowAt(buffer, buffer->pos, count);
+}
+
+void CheckWriteBufferOverflowAt(Buffer* buffer, size_t pos, size_t count)
+{
+  size_t len = buffer->len;
+  size_t new_pos = pos + count;
+  if (new_pos > len || new_pos < pos)
+    FatalError("Buffer overflow when writing %zu bytes\n", count);
+}
+
+void CheckWriteBufferOverflow(Buffer* buffer, size_t count)
+{
+  CheckWriteBufferOverflowAt(buffer, buffer->pos, count);
+}
+
+uint8_t GetU8At(Buffer* buffer, size_t* pos)
+{
+  CheckReadBufferOverflowAt(buffer, *pos, 1);
+  uint8_t value = buffer->data[*pos];
+  *pos += 1;
+  return value;
+}
+
+uint16_t GetU16(Buffer* buffer)
+{
+  CheckReadBufferOverflow(buffer, 2);
+  unsigned char* data = buffer->data + buffer->pos;
+  uint16_t value = ((uint16_t)data[0] << 8)
+                 | ((uint16_t)data[1] << 0);
+  buffer->pos += 2;
+  return value;
+}
+
+uint32_t GetU32(Buffer* buffer)
+{
+  CheckReadBufferOverflow(buffer, 4);
+  unsigned char* data = buffer->data + buffer->pos;
+  uint32_t value = ((uint16_t)data[0] << 24)
+                 | ((uint16_t)data[1] << 16)
+                 | ((uint16_t)data[2] << 8)
+                 | ((uint16_t)data[3] << 0);
+  buffer->pos += 4;
+  return value;
+}
+
+void GetBytesAt(Buffer* buffer, size_t* pos, void* bytes, size_t count)
+{
+  CheckReadBufferOverflowAt(buffer, *pos, count);
+  memcpy(bytes, buffer->data + *pos, count);
+  *pos += count;
+}
+
+void PutU16(Buffer* buffer, uint16_t value)
+{
+  CheckWriteBufferOverflow(buffer, 2);
+  unsigned char* data = buffer->data + buffer->pos;
+  data[0] = (value >> 8) & 0xFF;
+  data[1] = (value >> 0) & 0xFF;
+  buffer->pos += 2;
+}
+
+void PutU32(Buffer* buffer, uint16_t value)
+{
+  CheckWriteBufferOverflow(buffer, 4);
+  unsigned char* data = buffer->data + buffer->pos;
+  data[0] = (value >> 24) & 0xFF;
+  data[1] = (value >> 16) & 0xFF;
+  data[2] = (value >> 8) & 0xFF;
+  data[3] = (value >> 0) & 0xFF;
+  buffer->pos += 4;
+}
+
+void PutBytes(Buffer* buffer, void* bytes, size_t count)
+{
+  CheckWriteBufferOverflow(buffer, count);
+  memcpy(buffer->data + buffer->pos, bytes, count);
+  buffer->pos += count;
 }
 
 int Connect(char* addr_str)
@@ -162,80 +259,50 @@ bool EncodedHostnamesEqual(unsigned char* name1, unsigned char* name2)
   return true;
 }
 
-size_t DecompressEncodedHostname(
-  unsigned char* buffer,
-  size_t pos,
-  unsigned char* dest)
+void DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
 {
   uint8_t label_len;
   size_t total_len = 0;
-  size_t compressed_len = 0;
+  size_t compressed_end_pos = 0;
+  size_t pos = buffer->pos;
 
   do {
-    label_len = buffer[pos];
+    label_len = GetU8At(buffer, &pos);
     if (total_len >= MAX_NAME_LEN)
       FatalError("Hostname in response is too long\n");
     dest[total_len] = label_len;
-    pos++;
     total_len++;
     if (label_len & 0xC0) {
       // pointer
       if ((label_len & 0xC0) != 0xC0)
         FatalError("Reserved upper bits were used\n");
-      if (compressed_len != 0)
+      if (compressed_end_pos != 0)
         FatalError("Multiple pointers in name\n");
-      pos = ((label_len & 0x3F) << 8) | buffer[pos];
-      compressed_len = total_len + 1;
+      size_t offset = ((label_len & 0x3F) << 8);
+      offset |= GetU8At(buffer, &pos);
+      compressed_end_pos = pos;
+      pos = offset;
       total_len--; // remove pointer byte from dest
     } else {
       if (total_len + label_len > MAX_NAME_LEN)
         FatalError("Hostname in response is too long\n");
-      memcpy(dest + total_len, buffer + pos, label_len);
-      pos += label_len;
+      GetBytesAt(buffer, &pos, dest + total_len, label_len);
       total_len += label_len;
     }
   } while (label_len != 0);
 
-  return compressed_len ? compressed_len : total_len;
+  buffer->pos = compressed_end_pos ? compressed_end_pos : pos;
 }
 
-uint16_t GetU16(unsigned char* buffer)
-{
-  return ((uint16_t)buffer[0] << 8)
-       | ((uint16_t)buffer[1] << 0);
-}
-
-uint32_t GetU32(unsigned char* buffer)
-{
-  return ((uint32_t)buffer[0] << 24)
-       | ((uint32_t)buffer[1] << 16)
-       | ((uint32_t)buffer[2] << 8)
-       | ((uint32_t)buffer[3] << 0);
-}
-
-void PutU16(unsigned char* buffer, uint16_t value)
-{
-  buffer[0] = (value >> 8) & 0xFF;
-  buffer[1] = (value >> 0) & 0xFF;
-}
-
-void PutU32(unsigned char* buffer, uint16_t value)
-{
-  buffer[0] = (value >> 24) & 0xFF;
-  buffer[1] = (value >> 16) & 0xFF;
-  buffer[2] = (value >> 8) & 0xFF;
-  buffer[3] = (value >> 0) & 0xFF;
-}
-
-void FullSend(int sock, unsigned char* buffer, size_t count)
+void FullSend(int sock, unsigned char* data, size_t count)
 {
   size_t bytes_left = count;
 
   while (bytes_left != 0) {
-    ssize_t bytes_written = write(sock, buffer, bytes_left);
+    ssize_t bytes_written = write(sock, data, bytes_left);
     if (bytes_written == -1)
       FatalError("Failed to write to socket: %s\n", strerror(errno));
-    buffer += bytes_written;
+    data += bytes_written;
     bytes_left -= bytes_written;
   }
 }
@@ -247,40 +314,46 @@ void SendQuery(
   size_t encoded_hostname_len)
 {
   uint16_t len = HEADER_LEN + encoded_hostname_len + QUESTION_FIXED_LEN;
-  unsigned char* buffer = malloc(len + 2);
+  size_t total_len = len + 2;
 
-  if (!buffer)
+  Buffer buffer = {
+    .data = malloc(total_len),
+    .pos = 0,
+    .len = total_len
+  };
+
+  if (!buffer.data)
     FatalError("Failed to allocate memory for query buffer\n");
 
   // Fill in the length.
-  PutU16(buffer, len);
+  PutU16(&buffer, len);
 
   // Fill in header.
-  PutU16(buffer + 2, id);
-  PutU16(buffer + 4, OPCODE(OP_QUERY) | RD); // flags
-  PutU16(buffer + 6, 1); // question count
-  PutU16(buffer + 8, 0); // answer count
-  PutU16(buffer + 10, 0); // authority count
-  PutU16(buffer + 12, 0); // additional count
+  PutU16(&buffer, id);
+  PutU16(&buffer, OPCODE(OP_QUERY) | RD); // flags
+  PutU16(&buffer, 1); // question count
+  PutU16(&buffer, 0); // answer count
+  PutU16(&buffer, 0); // authority count
+  PutU16(&buffer, 0); // additional count
 
   // Fill in question.
-  memcpy(buffer + 2 + HEADER_LEN, encoded_hostname, encoded_hostname_len);
-  PutU16(buffer + 2 + HEADER_LEN + encoded_hostname_len, TYPE_A);
-  PutU16(buffer + 2 + HEADER_LEN + encoded_hostname_len + 2, CLASS_IN);
+  PutBytes(&buffer, encoded_hostname, encoded_hostname_len);
+  PutU16(&buffer, TYPE_A);
+  PutU16(&buffer, CLASS_IN);
 
-  FullSend(sock, buffer, len + 2);
+  FullSend(sock, buffer.data, buffer.len);
 
-  free(buffer);
+  free(buffer.data);
 }
 
-void FullRecv(int sock, unsigned char* buffer, size_t count)
+void FullRecv(int sock, unsigned char* data, size_t count)
 {
   size_t total_bytes_read = 0;
 
   while (total_bytes_read < count) {
     ssize_t bytes_read = read(
       sock,
-      buffer + total_bytes_read,
+      data + total_bytes_read,
       count - total_bytes_read);
     if (bytes_read == 0)
       FatalError("Unexpected EOF when reading from server\n");
@@ -297,28 +370,37 @@ void ReceiveResponse(
   struct in_addr* addr,
   uint32_t* ttl)
 {
-  unsigned char len_buffer[2];
   unsigned char encoded_hostname[MAX_NAME_LEN];
+  unsigned char len_data[2];
+  Buffer len_buffer = {
+    .data = len_data,
+    .pos = 0,
+    .len = sizeof(len_data)
+  };
 
-  FullRecv(sock, len_buffer, sizeof(len_buffer));
+  FullRecv(sock, len_buffer.data, len_buffer.len);
 
-  uint16_t len = GetU16(len_buffer);
+  uint16_t len = GetU16(&len_buffer);
 
   if (len < HEADER_LEN)
     FatalError("Response doesn't have header\n");
 
-  unsigned char* buffer = malloc(len);
+  Buffer buffer = {
+    .data = malloc(len),
+    .pos = 0,
+    .len = len
+  };
 
-  if (!buffer)
+  if (!buffer.data)
     FatalError("Failed to allocate memory for response buffer\n");
 
-  FullRecv(sock, buffer, len);
+  FullRecv(sock, buffer.data, buffer.len);
 
   // Extract header.
-  uint16_t id = GetU16(buffer);
-  uint16_t flags = GetU16(buffer + 2);
-  uint16_t question_count = GetU16(buffer + 4);
-  uint16_t answer_count = GetU16(buffer + 6);
+  uint16_t id = GetU16(&buffer);
+  uint16_t flags = GetU16(&buffer);
+  uint16_t question_count = GetU16(&buffer);
+  uint16_t answer_count = GetU16(&buffer);
 
   if (id != expected_id)
     FatalError("Expected ID 0x%X but received ID 0x%X\n", expected_id, id);
@@ -334,34 +416,31 @@ void ReceiveResponse(
     FatalError("Response code %u: %s\n", rcode, rcode_messages[rcode]);
   }
 
-  size_t pos = HEADER_LEN;
+  buffer.pos = HEADER_LEN;
 
   // Skip questions.
   for (uint16_t i = 0; i < question_count; i++) {
-    pos += DecompressEncodedHostname(buffer, pos, encoded_hostname);
-    pos += QUESTION_FIXED_LEN;
+    DecompressEncodedHostname(&buffer, encoded_hostname);
+    buffer.pos += QUESTION_FIXED_LEN;
   }
 
   for (uint16_t i = 0; i < answer_count; i++) {
-    pos += DecompressEncodedHostname(buffer, pos, encoded_hostname);
-    uint16_t type = GetU16(buffer + pos);
-    pos += 2;
-    uint16_t class = GetU16(buffer + pos);
-    pos += 2;
-    *ttl = GetU32(buffer + pos);
-    pos += 4;
-    uint16_t rdata_len = GetU16(buffer + pos);
-    pos += 2;
+    DecompressEncodedHostname(&buffer, encoded_hostname);
+    uint16_t type = GetU16(&buffer);
+    uint16_t class = GetU16(&buffer);
+    *ttl = GetU32(&buffer);
+    uint16_t rdata_len = GetU16(&buffer);
     if (type == TYPE_A && class == CLASS_IN) {
       if (rdata_len != 4)
         FatalError("Invalid RDLENGTH for IPv4 address\n");
-      addr->s_addr = htonl(GetU32(buffer + pos));
+      addr->s_addr = htonl(GetU32(&buffer));
       if (EncodedHostnamesEqual(expected_encoded_hostname, encoded_hostname)) {
-        free(buffer);
+        free(buffer.data);
         return;
       }
+    } else {
+      buffer.pos += rdata_len;
     }
-    pos += rdata_len;
   }
 
   FatalError("No matching answer in response\n");

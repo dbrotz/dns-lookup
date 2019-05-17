@@ -1,4 +1,4 @@
-CFLAGS := -Wall -Wextra -O2
+CFLAGS := -Wall -Wextra -pedantic -O2
 SOURCE := dns_lookup.c
 
 .PHONY: clean
