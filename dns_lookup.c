@@ -340,6 +340,7 @@ size_t DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
   size_t total_len = 0;
   size_t compressed_end_pos = 0;
   size_t pos = buffer->pos;
+  size_t last_offset = buffer->len;
 
   do {
     label_len = GetU8At(buffer, &pos);
@@ -351,11 +352,13 @@ size_t DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
       // pointer
       if ((label_len & 0xC0) != 0xC0)
         FatalError("Reserved upper bits were used\n");
-      if (compressed_end_pos != 0)
-        FatalError("Multiple pointers in name\n");
       size_t offset = ((label_len & 0x3F) << 8);
       offset |= GetU8At(buffer, &pos);
-      compressed_end_pos = pos;
+      if (offset >= last_offset)
+        FatalError("Possible infinite loop in compressed name\n");
+      last_offset = offset;
+      if (!compressed_end_pos)
+        compressed_end_pos = pos;
       pos = offset;
       total_len--; // remove pointer byte from dest
     } else {
