@@ -9,6 +9,12 @@ If one is not found, it will attempt another query using the new name.
 
 `dns_lookup [-v6] DNS_SERVER_ADDR HOSTNAME`
 
+`DNS_SERVER_ADDR` is the IPv4 address of the DNS server to query.
+
+`HOSTNAME` is the hostname whose IP address is to be looked up.
+
+By default, the IPv4 address is looked up. If the `-v6` option is used, then the IPv6 address is looked up instead.
+
 ## Building
 
 Just enter `make` on the command line.
