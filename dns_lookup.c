@@ -109,10 +109,10 @@ uint32_t GetU32(Buffer* buffer)
 {
   CheckReadBufferOverflow(buffer, 4);
   unsigned char* data = buffer->data + buffer->pos;
-  uint32_t value = ((uint16_t)data[0] << 24)
-                 | ((uint16_t)data[1] << 16)
-                 | ((uint16_t)data[2] << 8)
-                 | ((uint16_t)data[3] << 0);
+  uint32_t value = ((uint32_t)data[0] << 24)
+                 | ((uint32_t)data[1] << 16)
+                 | ((uint32_t)data[2] << 8)
+                 | ((uint32_t)data[3] << 0);
   buffer->pos += 4;
   return value;
 }
