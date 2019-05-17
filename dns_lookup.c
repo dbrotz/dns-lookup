@@ -66,6 +66,12 @@ typedef struct Buffer {
   size_t len;
 } Buffer;
 
+typedef enum Result {
+  RES_FOUND,
+  RES_CNAME,
+  RES_FAILED,
+} Result;
+
 const char* rcode_messages[NUM_RCODES] = {
   "No error",
   "Format error",
@@ -328,7 +334,7 @@ bool EncodedHostnamesEqual(
   return true;
 }
 
-void DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
+size_t DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
 {
   uint8_t label_len;
   size_t total_len = 0;
@@ -361,6 +367,8 @@ void DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
   } while (label_len != 0);
 
   buffer->pos = compressed_end_pos ? compressed_end_pos : pos;
+
+  return total_len;
 }
 
 void FullSend(int sock, unsigned char* data, size_t count)
@@ -433,14 +441,16 @@ void FullRecv(int sock, unsigned char* data, size_t count)
   }
 }
 
-void ReceiveResponse(
+Result ReceiveResponse(
   int sock,
   uint16_t expected_id,
   unsigned char* expected_encoded_hostname,
+  size_t* encoded_hostname_len,
   void* addr,
   uint32_t* ttl,
   bool v6)
 {
+  Result res = RES_FAILED;
   unsigned char encoded_hostname[MAX_NAME_LEN];
   unsigned char len_data[2];
   Buffer len_buffer = {
@@ -513,26 +523,29 @@ void ReceiveResponse(
         // We hope to find the address for the canonical name in a following
         // record.
         size_t expected_end = buffer.pos + rdata_len;
-        DecompressEncodedHostname(&buffer, expected_encoded_hostname);
+        *encoded_hostname_len = DecompressEncodedHostname(
+          &buffer,
+          expected_encoded_hostname);
         if (buffer.pos != expected_end
             || !ValidateEncodedHostname(expected_encoded_hostname))
           FatalError("Invalid hostname in CNAME RDATA\n");
         char hostname[MAX_NAME_LEN - 1];
         DecodeHostname(hostname, expected_encoded_hostname);
         printf("Switching to CNAME \"%s\"...\n", hostname);
+        res = RES_CNAME;
       } else if (type == expected_type) {
         if (rdata_len != expected_rdata_len)
           FatalError("Invalid RDLENGTH for IPv%c address\n", v6 ? '6' : '4');
         GetBytes(&buffer, addr, rdata_len);
         free(buffer.data);
-        return;
+        return RES_FOUND;
       } else {
         buffer.pos += rdata_len;
       }
     }
   }
 
-  FatalError("No matching answer with address record in response\n");
+  return res;
 }
 
 void PrintUsage(void)
@@ -572,16 +585,34 @@ int main(int argc, char** argv)
 
   uint16_t id = rand();
 
-  SendQuery(sock, id, encoded_hostname, encoded_hostname_len, v6);
-
   struct in_addr host_addr_v4;
   struct in6_addr host_addr_v6;
   void* host_addr = v6 ? (void*)&host_addr_v6 : (void*)&host_addr_v4;
   uint32_t ttl;
 
-  ReceiveResponse(sock, id, encoded_hostname, host_addr, &ttl, v6);
+  int tries = 0;
+  Result res;
+
+  do {
+    if (tries > 0)
+      printf("Retrying...\n");
+    SendQuery(sock, id, encoded_hostname, encoded_hostname_len, v6);
+    res = ReceiveResponse(
+      sock,
+      id,
+      encoded_hostname,
+      &encoded_hostname_len,
+      host_addr,
+      &ttl,
+      v6);
+    tries++;
+    id++;
+  } while (res == RES_CNAME && tries < 2);
 
   close(sock);
+
+  if (res != RES_FOUND)
+    FatalError("No matching answer with address record in response\n");
 
   static_assert(
     INET6_ADDRSTRLEN >= INET_ADDRSTRLEN,

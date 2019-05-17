@@ -3,7 +3,7 @@
 This is a simple DNS lookup tool. It connects to a DNS server using TCP and asks for the IPv4 or IPv6 address for a given hostname.
 It handles `A` (IPv4 address), `AAAA` (IPv6 address), and `CNAME` (canonical name) records. When it receives a `CNAME` record,
 it will inform the user that it is switching to the provided canonical name and attempt to find a matching address record later in the same response.
-If one is not found, the user currently has to manually perform another query using the new name.
+If one is not found, it will attempt another query using the new name.
 
 ## Usage
 
