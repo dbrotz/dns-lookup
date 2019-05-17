@@ -19,7 +19,9 @@ Just enter `make` on the command line.
 $ ./dns_lookup 1.1.1.1 google.com
 IP Address: 172.217.14.110
 TTL: 164
+Authoritative: no
 $ ./dns_lookup -v6 1.1.1.1 google.com
 IP Address: 2607:f8b0:4007:803::200e
 TTL: 95
+Authoritative: no
 ```

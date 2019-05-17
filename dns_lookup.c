@@ -56,6 +56,7 @@
 
 #define QR         (1 << 15)
 #define OPCODE(op) ((op) << 11)
+#define AA         (1 << 10)
 #define RD         (1 << 8)
 
 #define NUM_RCODES 6
@@ -524,6 +525,7 @@ Result ReceiveResponse(
   size_t* encoded_hostname_len,
   void* addr,
   uint32_t* ttl,
+  bool* is_authoritative,
   bool v6)
 {
   Result res = RES_FAILED;
@@ -564,6 +566,8 @@ Result ReceiveResponse(
 
   if (!(flags & QR))
     FatalError("QR bit is not set in response\n");
+
+  *is_authoritative = ((flags & AA) != 0);
 
   uint8_t rcode = flags & RCODE_MASK;
 
@@ -665,6 +669,7 @@ int main(int argc, char** argv)
   struct in6_addr host_addr_v6;
   void* host_addr = v6 ? (void*)&host_addr_v6 : (void*)&host_addr_v4;
   uint32_t ttl;
+  bool is_authoritative;
 
   int tries = 0;
   Result res;
@@ -680,6 +685,7 @@ int main(int argc, char** argv)
       &encoded_hostname_len,
       host_addr,
       &ttl,
+      &is_authoritative,
       v6);
     tries++;
     id++;
@@ -704,6 +710,7 @@ int main(int argc, char** argv)
 
   printf("IP Address: %s\n", host_addr_str);
   printf("TTL: %lu\n", (unsigned long)ttl);
+  printf("Authoritative: %s\n", is_authoritative ? "yes" : "no");
 
   return 0;
 }
