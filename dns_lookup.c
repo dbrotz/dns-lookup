@@ -215,13 +215,10 @@ bool IsValidCharacter(unsigned char c)
        || c == '-');
 }
 
-bool IsValidStartCharacter(unsigned char c)
-{
-  return ((c >= 'a' && c <= 'z')
-       || (c >= 'A' && c <= 'Z'));
-}
-
-bool IsValidEndCharacter(unsigned char c)
+// Check if the character can be used to start or end a label.
+// Originally, only letters could start a label, but RFC-1123
+// permitted digits to be used as well.
+bool IsValidStartEndCharacter(unsigned char c)
 {
   return ((c >= 'a' && c <= 'z')
        || (c >= 'A' && c <= 'Z')
@@ -248,10 +245,10 @@ void CheckLabelCharacters(const char* label, int label_len)
   }
 
   if (type == NONE) {
-    if (!IsValidStartCharacter(label[0])) {
+    if (!IsValidStartEndCharacter(label[0])) {
       c = label[0];
       type = START;
-    } else if (!IsValidEndCharacter(label[label_len - 1])) {
+    } else if (!IsValidStartEndCharacter(label[label_len - 1])) {
       c = label[label_len - 1];
       type = END;
     } else {
@@ -367,9 +364,9 @@ bool ValidateEncodedHostname(const unsigned char* encoded_hostname)
       return false;
     if (pos + label_len >= MAX_NAME_LEN)
       return false;
-    if (!IsValidStartCharacter(encoded_hostname[pos]))
+    if (!IsValidStartEndCharacter(encoded_hostname[pos]))
       return false;
-    if (!IsValidEndCharacter(encoded_hostname[pos + (label_len - 1)]))
+    if (!IsValidStartEndCharacter(encoded_hostname[pos + (label_len - 1)]))
       return false;
     for (size_t i = 0; i < label_len; i++)
       if (!IsValidCharacter(encoded_hostname[pos + i]))
