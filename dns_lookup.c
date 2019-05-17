@@ -510,16 +510,15 @@ void ReceiveResponse(
     } else {
       // hostnames match and it's Internet class
       if (type == TYPE_CNAME) {
-        size_t expected_end = buffer.pos + rdata_len;
-        DecompressEncodedHostname(&buffer, encoded_hostname);
-        if (buffer.pos != expected_end
-            || !ValidateEncodedHostname(encoded_hostname))
-          FatalError("Invalid hostname in CNAME RDATA\n");
         // We hope to find the address for the canonical name in a following
         // record.
-        memcpy(expected_encoded_hostname, encoded_hostname, MAX_NAME_LEN);
+        size_t expected_end = buffer.pos + rdata_len;
+        DecompressEncodedHostname(&buffer, expected_encoded_hostname);
+        if (buffer.pos != expected_end
+            || !ValidateEncodedHostname(expected_encoded_hostname))
+          FatalError("Invalid hostname in CNAME RDATA\n");
         char hostname[MAX_NAME_LEN - 1];
-        DecodeHostname(hostname, encoded_hostname);
+        DecodeHostname(hostname, expected_encoded_hostname);
         printf("Switching to CNAME \"%s\"...\n", hostname);
       } else if (type == expected_type) {
         if (rdata_len != expected_rdata_len)
