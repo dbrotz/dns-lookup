@@ -472,7 +472,7 @@ int main(int argc, char** argv)
   if (argc < 3)
     PrintUsage();
 
-  char **after_switch;
+  char** after_switch;
 
   if (!strcmp(argv[1], "-v6")) {
     v6 = true;
