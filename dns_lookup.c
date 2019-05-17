@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdnoreturn.h>
 #include <string.h>
+#include <assert.h>
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
@@ -18,7 +19,8 @@
 #define MAX_NAME_LEN  255
 #define MAX_LABEL_LEN 63
 
-#define TYPE_A 1 // address record
+#define TYPE_A 1     // IPv4 address record
+#define TYPE_AAAA 28 // IPv6 address record
 
 #define CLASS_IN 1 // Internet
 
@@ -122,6 +124,11 @@ void GetBytesAt(Buffer* buffer, size_t* pos, void* bytes, size_t count)
   CheckReadBufferOverflowAt(buffer, *pos, count);
   memcpy(bytes, buffer->data + *pos, count);
   *pos += count;
+}
+
+void GetBytes(Buffer* buffer, void* bytes, size_t count)
+{
+  GetBytesAt(buffer, &buffer->pos, bytes, count);
 }
 
 void PutU16(Buffer* buffer, uint16_t value)
@@ -311,7 +318,8 @@ void SendQuery(
   int sock,
   uint16_t id,
   unsigned char* encoded_hostname,
-  size_t encoded_hostname_len)
+  size_t encoded_hostname_len,
+  bool v6)
 {
   uint16_t len = HEADER_LEN + encoded_hostname_len + QUESTION_FIXED_LEN;
   size_t total_len = len + 2;
@@ -338,7 +346,7 @@ void SendQuery(
 
   // Fill in question.
   PutBytes(&buffer, encoded_hostname, encoded_hostname_len);
-  PutU16(&buffer, TYPE_A);
+  PutU16(&buffer, v6 ? TYPE_AAAA : TYPE_A);
   PutU16(&buffer, CLASS_IN);
 
   FullSend(sock, buffer.data, buffer.len);
@@ -367,8 +375,9 @@ void ReceiveResponse(
   int sock,
   uint16_t expected_id,
   unsigned char* expected_encoded_hostname,
-  struct in_addr* addr,
-  uint32_t* ttl)
+  void* addr,
+  uint32_t* ttl,
+  bool v6)
 {
   unsigned char encoded_hostname[MAX_NAME_LEN];
   unsigned char len_data[2];
@@ -424,16 +433,19 @@ void ReceiveResponse(
     buffer.pos += QUESTION_FIXED_LEN;
   }
 
+  uint16_t expected_type = v6 ? TYPE_AAAA : TYPE_A;
+  uint16_t expected_rdata_len = v6 ? 16 : 4;
+
   for (uint16_t i = 0; i < answer_count; i++) {
     DecompressEncodedHostname(&buffer, encoded_hostname);
     uint16_t type = GetU16(&buffer);
     uint16_t class = GetU16(&buffer);
     *ttl = GetU32(&buffer);
     uint16_t rdata_len = GetU16(&buffer);
-    if (type == TYPE_A && class == CLASS_IN) {
-      if (rdata_len != 4)
-        FatalError("Invalid RDLENGTH for IPv4 address\n");
-      addr->s_addr = htonl(GetU32(&buffer));
+    if (type == expected_type && class == CLASS_IN) {
+      if (rdata_len != expected_rdata_len)
+        FatalError("Invalid RDLENGTH for IPv%c address\n", v6 ? '6' : '4');
+      GetBytes(&buffer, addr, rdata_len);
       if (EncodedHostnamesEqual(expected_encoded_hostname, encoded_hostname)) {
         free(buffer.data);
         return;
@@ -446,15 +458,33 @@ void ReceiveResponse(
   FatalError("No matching answer in response\n");
 }
 
+void PrintUsage(void)
+{
+  FatalError("Usage: dns_lookup [-v6] DNS_SERVER_ADDR HOSTNAME\n");
+}
+
 int main(int argc, char** argv)
 {
-  if (argc != 3)
-    FatalError("Usage: dns_lookup DNS_SERVER_ADDR HOSTNAME\n");
-
   srand(time(NULL));
 
-  char* dns_server_addr_str = argv[1];
-  char* hostname = argv[2];
+  bool v6 = false;
+
+  if (argc < 3)
+    PrintUsage();
+
+  char **after_switch;
+
+  if (!strcmp(argv[1], "-v6")) {
+    v6 = true;
+    if (argc < 4)
+      PrintUsage();
+    after_switch = argv + 2;
+  } else {
+    after_switch = argv + 1;
+  }
+
+  char* dns_server_addr_str = after_switch[0];
+  char* hostname = after_switch[1];
 
   size_t encoded_hostname_len = 0;
   unsigned char* encoded_hostname = EncodeHostname(
@@ -465,19 +495,26 @@ int main(int argc, char** argv)
 
   uint16_t id = rand();
 
-  SendQuery(sock, id, encoded_hostname, encoded_hostname_len);
+  SendQuery(sock, id, encoded_hostname, encoded_hostname_len, v6);
 
-  struct in_addr host_addr;
+  struct in_addr host_addr_v4;
+  struct in6_addr host_addr_v6;
+  void* host_addr = v6 ? (void*)&host_addr_v6 : (void*)&host_addr_v4;
   uint32_t ttl;
 
-  ReceiveResponse(sock, id, encoded_hostname, &host_addr, &ttl);
+  ReceiveResponse(sock, id, encoded_hostname, host_addr, &ttl, v6);
 
   close(sock);
   free(encoded_hostname);
 
-  char host_addr_str[INET_ADDRSTRLEN];
+  static_assert(
+    INET6_ADDRSTRLEN >= INET_ADDRSTRLEN,
+    "IPv6 buffer not as big as IPv4 buffer");
+  char host_addr_str[INET6_ADDRSTRLEN];
 
-  if (!inet_ntop(AF_INET, &host_addr, host_addr_str, INET_ADDRSTRLEN))
+  int af = v6 ? AF_INET6 : AF_INET;
+  socklen_t size = v6 ? INET6_ADDRSTRLEN : INET_ADDRSTRLEN;
+  if (!inet_ntop(af, host_addr, host_addr_str, size))
     FatalError(
       "Failed to convert host address to text: %s\n",
       strerror(errno));
