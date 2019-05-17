@@ -17,10 +17,11 @@
 #define DNS_PORT 53
 
 #define MAX_NAME_LEN  255
-#define MAX_LABEL_LEN 63
+#define MAX_LABEL_LEN  63
 
-#define TYPE_A 1     // IPv4 address record
-#define TYPE_AAAA 28 // IPv6 address record
+#define TYPE_A      1 // IPv4 address record
+#define TYPE_CNAME  5 // canonical name record
+#define TYPE_AAAA  28 // IPv6 address record
 
 #define CLASS_IN 1 // Internet
 
@@ -158,7 +159,7 @@ void PutBytes(Buffer* buffer, void* bytes, size_t count)
   buffer->pos += count;
 }
 
-int Connect(char* addr_str)
+int Connect(const char* addr_str)
 {
   int sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -188,17 +189,15 @@ bool IsValidCharacter(unsigned char c)
        || c == '-');
 }
 
-unsigned char* EncodeHostname(char* hostname, size_t* len)
+void EncodeHostname(
+  const char* hostname,
+  unsigned char* encoded_hostname,
+  size_t* len)
 {
   *len = strlen(hostname) + 2;
 
   if (*len > MAX_NAME_LEN)
     FatalError("Hostname in query is too long\n");
-
-  unsigned char* encoded_hostname = malloc(*len);
-
-  if (!encoded_hostname)
-    FatalError("Failed to allocate memory for encoded hostname\n");
 
   int label_start = 0;
   int label_len = 0;
@@ -234,8 +233,49 @@ do {                                                                 \
 #undef COPY_LABEL
 
   encoded_hostname[out++] = 0;
+}
 
-  return encoded_hostname;
+// encoded_hostname can't be compressed and hostname has to be
+// able to hold at least MAX_NAME_LEN - 1 bytes.
+// Also, this function doesn't attempt to validate encoded_hostname,
+// so it has to be validated before calling this.
+void DecodeHostname(
+  char* hostname,
+  const unsigned char* encoded_hostname)
+{
+  uint8_t label_len;
+  size_t in_pos = 0;
+  size_t out_pos = 0;
+
+  while ((label_len = encoded_hostname[in_pos++]) != 0) {
+    memcpy(hostname + out_pos, encoded_hostname + in_pos, label_len);
+    in_pos += label_len;
+    out_pos += label_len;
+    hostname[out_pos++] = '.';
+  }
+
+  out_pos--;
+  hostname[out_pos] = 0;
+}
+
+// encoded_hostname can't be compressed.
+bool ValidateEncodedHostname(const unsigned char* encoded_hostname)
+{
+  uint8_t label_len;
+  size_t pos = 0;
+
+  while ((label_len = encoded_hostname[pos++]) != 0) {
+    if (label_len > MAX_LABEL_LEN)
+      return false;
+    if (pos + label_len >= MAX_NAME_LEN)
+      return false;
+    for (size_t i = 0; i < label_len; i++)
+      if (!IsValidCharacter(encoded_hostname[pos + i]))
+        return false;
+    pos += label_len;
+  }
+
+  return true;
 }
 
 // Don't use the standard tolower() function because of potential
@@ -245,7 +285,9 @@ unsigned char ToLower(unsigned char c)
   return (c >= 'A' && c <= 'Z') ? c + 'a' - 'A' : c;
 }
 
-bool EncodedHostnamesEqual(unsigned char* name1, unsigned char* name2)
+bool EncodedHostnamesEqual(
+  const unsigned char* name1,
+  const unsigned char* name2)
 {
   int i;
 
@@ -442,20 +484,36 @@ void ReceiveResponse(
     uint16_t class = GetU16(&buffer);
     *ttl = GetU32(&buffer);
     uint16_t rdata_len = GetU16(&buffer);
-    if (type == expected_type && class == CLASS_IN) {
-      if (rdata_len != expected_rdata_len)
-        FatalError("Invalid RDLENGTH for IPv%c address\n", v6 ? '6' : '4');
-      GetBytes(&buffer, addr, rdata_len);
-      if (EncodedHostnamesEqual(expected_encoded_hostname, encoded_hostname)) {
+    if (!EncodedHostnamesEqual(expected_encoded_hostname, encoded_hostname)
+        || class != CLASS_IN) {
+      buffer.pos += rdata_len;
+    } else {
+      // hostnames match and it's Internet class
+      if (type == TYPE_CNAME) {
+        size_t expected_end = buffer.pos + rdata_len;
+        DecompressEncodedHostname(&buffer, encoded_hostname);
+        if (buffer.pos != expected_end
+            || !ValidateEncodedHostname(encoded_hostname))
+          FatalError("Invalid hostname in CNAME RDATA\n");
+        // We hope to find the address for the canonical name in a following
+        // record.
+        memcpy(expected_encoded_hostname, encoded_hostname, MAX_NAME_LEN);
+        char hostname[MAX_NAME_LEN - 1];
+        DecodeHostname(hostname, encoded_hostname);
+        printf("Switching to CNAME \"%s\"...\n", hostname);
+      } else if (type == expected_type) {
+        if (rdata_len != expected_rdata_len)
+          FatalError("Invalid RDLENGTH for IPv%c address\n", v6 ? '6' : '4');
+        GetBytes(&buffer, addr, rdata_len);
         free(buffer.data);
         return;
+      } else {
+        buffer.pos += rdata_len;
       }
-    } else {
-      buffer.pos += rdata_len;
     }
   }
 
-  FatalError("No matching answer in response\n");
+  FatalError("No matching answer with address record in response\n");
 }
 
 void PrintUsage(void)
@@ -487,9 +545,9 @@ int main(int argc, char** argv)
   char* hostname = after_switch[1];
 
   size_t encoded_hostname_len = 0;
-  unsigned char* encoded_hostname = EncodeHostname(
-    hostname,
-    &encoded_hostname_len);
+  unsigned char encoded_hostname[MAX_NAME_LEN];
+
+  EncodeHostname(hostname, encoded_hostname, &encoded_hostname_len);
 
   int sock = Connect(dns_server_addr_str);
 
@@ -505,7 +563,6 @@ int main(int argc, char** argv)
   ReceiveResponse(sock, id, encoded_hostname, host_addr, &ttl, v6);
 
   close(sock);
-  free(encoded_hostname);
 
   static_assert(
     INET6_ADDRSTRLEN >= INET_ADDRSTRLEN,
