@@ -67,6 +67,11 @@ typedef struct Buffer {
   size_t len;
 } Buffer;
 
+typedef struct EncodedName {
+  unsigned char name[MAX_NAME_LEN];
+  size_t len;
+} EncodedName;
+
 typedef enum Result {
   RES_FOUND,
   RES_CNAME,
@@ -208,22 +213,39 @@ int Connect(const char* addr_str)
   return sock;
 }
 
-bool IsValidCharacter(unsigned char c)
+void EncodeName(const char* name, EncodedName* encoded_name)
 {
-  return ((c >= 'a' && c <= 'z')
-       || (c >= 'A' && c <= 'Z')
-       || (c >= '0' && c <= '9')
-       || c == '-');
-}
+  encoded_name->len = strlen(name) + 2;
 
-// Check if the character can be used to start or end a label.
-// Originally, only letters could start a label, but RFC-1123
-// permitted digits to be used as well.
-bool IsValidStartEndCharacter(unsigned char c)
-{
-  return ((c >= 'a' && c <= 'z')
-       || (c >= 'A' && c <= 'Z')
-       || (c >= '0' && c <= '9'));
+  if (encoded_name->len > MAX_NAME_LEN)
+    FatalError("Name is too long\n");
+
+  int label_start = 0;
+  int label_len = 0;
+  int in_pos = 0;
+  int out_pos = 0;
+
+  while (1) {
+    unsigned char c = name[in_pos];
+    if (c == '.' || c == 0) {
+      if (label_len == 0)
+        FatalError("Empty label in name\n");
+      if (label_len > MAX_LABEL_LEN)
+        FatalError("Label is too long\n");
+      encoded_name->name[out_pos++] = label_len;
+      memcpy(encoded_name->name + out_pos, name + label_start, label_len);
+      out_pos += label_len;
+      if (c == 0)
+        break;
+      label_start = in_pos + 1;
+      label_len = 0;
+    } else {
+      label_len++;
+    }
+    in_pos++;
+  }
+
+  encoded_name->name[out_pos] = 0;
 }
 
 bool IsPrintableCharacter(unsigned char c)
@@ -231,151 +253,30 @@ bool IsPrintableCharacter(unsigned char c)
   return (c >= 0x20 && c < 0x7F);
 }
 
-void CheckLabelCharacters(const char* label, int label_len)
-{
-  char s[5];
-  char c = 0;
-  enum { NONE, START, END, ANY } type = NONE;
-
-  for (int i = 0; i < label_len; i++) {
-    if (!IsValidCharacter(label[i])) {
-      c = label[i];
-      type = ANY;
-      break;
-    }
-  }
-
-  if (type == NONE) {
-    if (!IsValidStartEndCharacter(label[0])) {
-      c = label[0];
-      type = START;
-    } else if (!IsValidStartEndCharacter(label[label_len - 1])) {
-      c = label[label_len - 1];
-      type = END;
-    } else {
-      return;
-    }
-  }
-
-  if (IsPrintableCharacter(c))
-    snprintf(s, sizeof(s), "%c", c);
-  else
-    snprintf(s, sizeof(s), "\\x%02X", c);
-
-  switch (type) {
-  case NONE:
-    // not possible
-    break;
-  case START:
-    FatalError(
-      "Label \"%.*s\" has invalid starting character: \"%s\"\n",
-      label_len,
-      label,
-      s);
-    break;
-  case END:
-    FatalError(
-      "Label \"%.*s\" has invalid ending character: \"%s\"\n",
-      label_len,
-      label,
-      s);
-    break;
-  case ANY:
-    FatalError("Hostname contains invalid character: \"%s\"\n", s);
-    break;
-  }
-}
-
-void EncodeHostname(
-  const char* hostname,
-  unsigned char* encoded_hostname,
-  size_t* len)
-{
-  *len = strlen(hostname) + 2;
-
-  if (*len > MAX_NAME_LEN)
-    FatalError("Hostname in query is too long\n");
-
-  int label_start = 0;
-  int label_len = 0;
-  int out = 0;
-
-#define COPY_LABEL()                                                 \
-do {                                                                 \
-  if (label_len == 0)                                                \
-    FatalError("Empty label in hostname\n");                         \
-  if (label_len > MAX_LABEL_LEN)                                     \
-    FatalError("Label is too long\n");                               \
-  CheckLabelCharacters(hostname + label_start, label_len);           \
-  encoded_hostname[out++] = label_len;                               \
-  memcpy(encoded_hostname + out, hostname + label_start, label_len); \
-  out += label_len;                                                  \
-} while (0)
-
-  for (int i = 0; hostname[i]; i++) {
-    unsigned char c = hostname[i];
-    if (c == '.') {
-      COPY_LABEL();
-      label_start = i + 1;
-      label_len = 0;
-    } else {
-      label_len++;
-    }
-  }
-
-  // Copy the final label at the end.
-  COPY_LABEL();
-
-#undef COPY_LABEL
-
-  encoded_hostname[out++] = 0;
-}
-
-// encoded_hostname can't be compressed and hostname has to be
+// encoded_name can't be compressed and name has to be
 // able to hold at least MAX_NAME_LEN - 1 bytes.
-// Also, this function doesn't attempt to validate encoded_hostname,
+// Also, this function doesn't attempt to validate encoded_name,
 // so it has to be validated before calling this.
-void DecodeHostname(
-  char* hostname,
-  const unsigned char* encoded_hostname)
+void DecodeName(char* name, const EncodedName* encoded_name)
 {
   uint8_t label_len;
   size_t in_pos = 0;
   size_t out_pos = 0;
 
-  while ((label_len = encoded_hostname[in_pos++]) != 0) {
-    memcpy(hostname + out_pos, encoded_hostname + in_pos, label_len);
+  while ((label_len = encoded_name->name[in_pos++]) != 0) {
+    memcpy(name + out_pos, encoded_name->name + in_pos, label_len);
     in_pos += label_len;
     out_pos += label_len;
-    hostname[out_pos++] = '.';
+    name[out_pos++] = '.';
   }
 
   out_pos--;
-  hostname[out_pos] = 0;
-}
+  name[out_pos] = 0;
 
-// encoded_hostname can't be compressed.
-bool ValidateEncodedHostname(const unsigned char* encoded_hostname)
-{
-  uint8_t label_len;
-  size_t pos = 0;
-
-  while ((label_len = encoded_hostname[pos++]) != 0) {
-    if (label_len > MAX_LABEL_LEN)
-      return false;
-    if (pos + label_len >= MAX_NAME_LEN)
-      return false;
-    if (!IsValidStartEndCharacter(encoded_hostname[pos]))
-      return false;
-    if (!IsValidStartEndCharacter(encoded_hostname[pos + (label_len - 1)]))
-      return false;
-    for (size_t i = 0; i < label_len; i++)
-      if (!IsValidCharacter(encoded_hostname[pos + i]))
-        return false;
-    pos += label_len;
-  }
-
-  return true;
+  // Replace unprintable chars with '?'.
+  for (size_t i = 0; i < out_pos; i++)
+    if (!IsPrintableCharacter(name[i]))
+      name[i] = '?';
 }
 
 // Don't use the standard tolower() function because of potential
@@ -385,30 +286,28 @@ unsigned char ToLower(unsigned char c)
   return (c >= 'A' && c <= 'Z') ? c + 'a' - 'A' : c;
 }
 
-bool EncodedHostnamesEqual(
-  const unsigned char* name1,
-  const unsigned char* name2)
+bool EncodedNamesEqual(const EncodedName* name1, const EncodedName* name2)
 {
-  int i;
+  if (name1->len != name2->len)
+    return false;
 
-  for (i = 0; i < MAX_NAME_LEN; i++) {
-    int c1 = ToLower(name1[i]);
-    int c2 = ToLower(name2[i]);
+  if (name1->len > MAX_NAME_LEN)
+    FatalError("Name is too long\n");
+
+  int len = name1->len;
+
+  for (int i = 0; i < len; i++) {
+    unsigned char c1 = ToLower(name1->name[i]);
+    unsigned char c2 = ToLower(name2->name[i]);
 
     if (c1 != c2)
       return false;
-
-    if (!c1)
-      break;
   }
-
-  if (i == MAX_NAME_LEN)
-    FatalError("Hostnames are too long\n");
 
   return true;
 }
 
-size_t DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
+void DecompressEncodedName(Buffer* buffer, EncodedName* dest)
 {
   uint8_t label_len;
   size_t total_len = 0;
@@ -419,8 +318,8 @@ size_t DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
   do {
     label_len = GetU8At(buffer, &pos);
     if (total_len >= MAX_NAME_LEN)
-      FatalError("Hostname in response is too long\n");
-    dest[total_len] = label_len;
+      FatalError("Compressed name is too long\n");
+    dest->name[total_len] = label_len;
     total_len++;
     if (label_len & 0xC0) {
       // pointer
@@ -437,15 +336,15 @@ size_t DecompressEncodedHostname(Buffer* buffer, unsigned char* dest)
       total_len--; // remove pointer byte from dest
     } else {
       if (total_len + label_len > MAX_NAME_LEN)
-        FatalError("Hostname in response is too long\n");
-      GetBytesAt(buffer, &pos, dest + total_len, label_len);
+        FatalError("Compressed name is too long\n");
+      GetBytesAt(buffer, &pos, dest->name + total_len, label_len);
       total_len += label_len;
     }
   } while (label_len != 0);
 
   buffer->pos = compressed_end_pos ? compressed_end_pos : pos;
 
-  return total_len;
+  dest->len = total_len;
 }
 
 void FullSend(int sock, unsigned char* data, size_t count)
@@ -464,11 +363,10 @@ void FullSend(int sock, unsigned char* data, size_t count)
 void SendQuery(
   int sock,
   uint16_t id,
-  unsigned char* encoded_hostname,
-  size_t encoded_hostname_len,
+  EncodedName* encoded_name,
   bool v6)
 {
-  uint16_t len = HEADER_LEN + encoded_hostname_len + QUESTION_FIXED_LEN;
+  uint16_t len = HEADER_LEN + encoded_name->len + QUESTION_FIXED_LEN;
   size_t total_len = len + 2;
 
   Buffer buffer = {
@@ -492,7 +390,7 @@ void SendQuery(
   PutU16(&buffer, 0); // additional count
 
   // Fill in question.
-  PutBytes(&buffer, encoded_hostname, encoded_hostname_len);
+  PutBytes(&buffer, encoded_name->name, encoded_name->len);
   PutU16(&buffer, v6 ? TYPE_AAAA : TYPE_A);
   PutU16(&buffer, CLASS_IN);
 
@@ -521,15 +419,14 @@ void FullRecv(int sock, unsigned char* data, size_t count)
 Result ReceiveResponse(
   int sock,
   uint16_t expected_id,
-  unsigned char* expected_encoded_hostname,
-  size_t* encoded_hostname_len,
+  EncodedName* expected_encoded_name,
   void* addr,
   uint32_t* ttl,
   bool* is_authoritative,
   bool v6)
 {
   Result res = RES_FAILED;
-  unsigned char encoded_hostname[MAX_NAME_LEN];
+  EncodedName encoded_name;
   unsigned char len_data[2];
   Buffer len_buffer = {
     .data = len_data,
@@ -581,7 +478,7 @@ Result ReceiveResponse(
 
   // Skip questions.
   for (uint16_t i = 0; i < question_count; i++) {
-    DecompressEncodedHostname(&buffer, encoded_hostname);
+    DecompressEncodedName(&buffer, &encoded_name);
     buffer.pos += QUESTION_FIXED_LEN;
   }
 
@@ -589,29 +486,26 @@ Result ReceiveResponse(
   uint16_t expected_rdata_len = v6 ? 16 : 4;
 
   for (uint16_t i = 0; i < answer_count; i++) {
-    DecompressEncodedHostname(&buffer, encoded_hostname);
+    DecompressEncodedName(&buffer, &encoded_name);
     uint16_t type = GetU16(&buffer);
     uint16_t class = GetU16(&buffer);
     *ttl = GetU32(&buffer);
     uint16_t rdata_len = GetU16(&buffer);
-    if (!EncodedHostnamesEqual(expected_encoded_hostname, encoded_hostname)
+    if (!EncodedNamesEqual(expected_encoded_name, &encoded_name)
         || class != CLASS_IN) {
       buffer.pos += rdata_len;
     } else {
-      // hostnames match and it's Internet class
+      // names match and it's Internet class
       if (type == TYPE_CNAME) {
         // We hope to find the address for the canonical name in a following
         // record.
         size_t expected_end = buffer.pos + rdata_len;
-        *encoded_hostname_len = DecompressEncodedHostname(
-          &buffer,
-          expected_encoded_hostname);
-        if (buffer.pos != expected_end
-            || !ValidateEncodedHostname(expected_encoded_hostname))
-          FatalError("Invalid hostname in CNAME RDATA\n");
-        char hostname[MAX_NAME_LEN - 1];
-        DecodeHostname(hostname, expected_encoded_hostname);
-        printf("Switching to CNAME \"%s\"...\n", hostname);
+        DecompressEncodedName(&buffer, expected_encoded_name);
+        if (buffer.pos != expected_end)
+          FatalError("Invalid name in CNAME RDATA\n");
+        char name[MAX_NAME_LEN - 1];
+        DecodeName(name, expected_encoded_name);
+        printf("Switching to CNAME \"%s\"...\n", name);
         res = RES_CNAME;
       } else if (type == expected_type) {
         if (rdata_len != expected_rdata_len)
@@ -655,10 +549,9 @@ int main(int argc, char** argv)
   char* dns_server_addr_str = argv[1];
   char* hostname = argv[2];
 
-  size_t encoded_hostname_len = 0;
-  unsigned char encoded_hostname[MAX_NAME_LEN];
+  EncodedName encoded_name;
 
-  EncodeHostname(hostname, encoded_hostname, &encoded_hostname_len);
+  EncodeName(hostname, &encoded_name);
 
   int sock = Connect(dns_server_addr_str);
 
@@ -676,12 +569,11 @@ int main(int argc, char** argv)
   do {
     if (tries > 0)
       printf("Retrying...\n");
-    SendQuery(sock, id, encoded_hostname, encoded_hostname_len, v6);
+    SendQuery(sock, id, &encoded_name, v6);
     res = ReceiveResponse(
       sock,
       id,
-      encoded_hostname,
-      &encoded_hostname_len,
+      &encoded_name,
       host_addr,
       &ttl,
       &is_authoritative,
