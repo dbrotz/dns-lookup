@@ -519,6 +519,7 @@ Result ReceiveResponse(
     }
   }
 
+  free(buffer.data);
   return res;
 }
 
