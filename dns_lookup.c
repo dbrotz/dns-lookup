@@ -36,8 +36,9 @@
 
 #define DNS_PORT 53
 
-#define MAX_NAME_LEN  255
-#define MAX_LABEL_LEN  63
+#define MAX_ENCODED_NAME_LEN  255
+#define MAX_DECODED_NAME_LEN  253
+#define MAX_LABEL_LEN          63
 
 #define TYPE_A      1 // IPv4 address record
 #define TYPE_CNAME  5 // canonical name record
@@ -68,7 +69,7 @@ typedef struct Buffer {
 } Buffer;
 
 typedef struct EncodedName {
-  unsigned char name[MAX_NAME_LEN];
+  unsigned char name[MAX_ENCODED_NAME_LEN];
   size_t len;
 } EncodedName;
 
@@ -217,7 +218,7 @@ void EncodeName(const char* name, EncodedName* encoded_name)
 {
   encoded_name->len = strlen(name) + 2;
 
-  if (encoded_name->len > MAX_NAME_LEN)
+  if (encoded_name->len > MAX_ENCODED_NAME_LEN)
     FatalError("Name is too long\n");
 
   int label_start = 0;
@@ -254,7 +255,7 @@ bool IsPrintableCharacter(unsigned char c)
 }
 
 // encoded_name can't be compressed and name has to be
-// able to hold at least MAX_NAME_LEN - 1 bytes.
+// able to hold at least MAX_DECODED_NAME_LEN + 1 bytes.
 // Also, this function doesn't attempt to validate encoded_name,
 // so it has to be validated before calling this.
 void DecodeName(char* name, const EncodedName* encoded_name)
@@ -291,7 +292,7 @@ bool EncodedNamesEqual(const EncodedName* name1, const EncodedName* name2)
   if (name1->len != name2->len)
     return false;
 
-  if (name1->len > MAX_NAME_LEN)
+  if (name1->len > MAX_ENCODED_NAME_LEN)
     FatalError("Name is too long\n");
 
   int len = name1->len;
@@ -317,7 +318,7 @@ size_t DecompressEncodedName(Buffer* buffer, EncodedName* dest)
 
   do {
     label_len = GetU8At(buffer, &pos);
-    if (total_len >= MAX_NAME_LEN)
+    if (total_len >= MAX_ENCODED_NAME_LEN)
       FatalError("Compressed name is too long\n");
     dest->name[total_len] = label_len;
     total_len++;
@@ -335,7 +336,7 @@ size_t DecompressEncodedName(Buffer* buffer, EncodedName* dest)
       pos = offset;
       total_len--; // remove pointer byte from dest
     } else {
-      if (total_len + label_len > MAX_NAME_LEN)
+      if (total_len + label_len > MAX_ENCODED_NAME_LEN)
         FatalError("Compressed name is too long\n");
       GetBytesAt(buffer, &pos, dest->name + total_len, label_len);
       total_len += label_len;
@@ -500,7 +501,7 @@ Result ReceiveResponse(
         size_t end = DecompressEncodedName(&buffer, expected_encoded_name);
         if (end != buffer.pos + rdata_len)
           FatalError("Invalid name in CNAME RDATA\n");
-        char name[MAX_NAME_LEN - 1];
+        char name[MAX_DECODED_NAME_LEN + 1];
         DecodeName(name, expected_encoded_name);
         printf("Switching to CNAME \"%s\"...\n", name);
         res = RES_CNAME;
