@@ -307,7 +307,7 @@ bool EncodedNamesEqual(const EncodedName* name1, const EncodedName* name2)
   return true;
 }
 
-void DecompressEncodedName(Buffer* buffer, EncodedName* dest)
+size_t DecompressEncodedName(Buffer* buffer, EncodedName* dest)
 {
   uint8_t label_len;
   size_t total_len = 0;
@@ -342,9 +342,9 @@ void DecompressEncodedName(Buffer* buffer, EncodedName* dest)
     }
   } while (label_len != 0);
 
-  buffer->pos = compressed_end_pos ? compressed_end_pos : pos;
-
   dest->len = total_len;
+
+  return compressed_end_pos ? compressed_end_pos : pos;
 }
 
 void FullSend(int sock, unsigned char* data, size_t count)
@@ -478,7 +478,7 @@ Result ReceiveResponse(
 
   // Skip questions.
   for (uint16_t i = 0; i < question_count; i++) {
-    DecompressEncodedName(&buffer, &encoded_name);
+    buffer.pos = DecompressEncodedName(&buffer, &encoded_name);
     buffer.pos += QUESTION_FIXED_LEN;
   }
 
@@ -486,22 +486,19 @@ Result ReceiveResponse(
   uint16_t expected_rdata_len = v6 ? 16 : 4;
 
   for (uint16_t i = 0; i < answer_count; i++) {
-    DecompressEncodedName(&buffer, &encoded_name);
+    buffer.pos = DecompressEncodedName(&buffer, &encoded_name);
     uint16_t type = GetU16(&buffer);
     uint16_t class = GetU16(&buffer);
     *ttl = GetU32(&buffer);
     uint16_t rdata_len = GetU16(&buffer);
-    if (!EncodedNamesEqual(expected_encoded_name, &encoded_name)
-        || class != CLASS_IN) {
-      buffer.pos += rdata_len;
-    } else {
+    if (EncodedNamesEqual(expected_encoded_name, &encoded_name)
+        && class == CLASS_IN) {
       // names match and it's Internet class
       if (type == TYPE_CNAME) {
         // We hope to find the address for the canonical name in a following
         // record.
-        size_t expected_end = buffer.pos + rdata_len;
-        DecompressEncodedName(&buffer, expected_encoded_name);
-        if (buffer.pos != expected_end)
+        size_t end = DecompressEncodedName(&buffer, expected_encoded_name);
+        if (end != buffer.pos + rdata_len)
           FatalError("Invalid name in CNAME RDATA\n");
         char name[MAX_NAME_LEN - 1];
         DecodeName(name, expected_encoded_name);
@@ -511,12 +508,11 @@ Result ReceiveResponse(
         if (rdata_len != expected_rdata_len)
           FatalError("Invalid RDLENGTH for IPv%c address\n", v6 ? '6' : '4');
         GetBytes(&buffer, addr, rdata_len);
-        free(buffer.data);
-        return RES_FOUND;
-      } else {
-        buffer.pos += rdata_len;
+        res = RES_FOUND;
+        break;
       }
     }
+    buffer.pos += rdata_len;
   }
 
   free(buffer.data);
